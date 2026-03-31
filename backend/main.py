@@ -13,17 +13,20 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from cast_manager import ChromecastManager
 from config import settings
+from plex_auth import PlexAuthError, PlexAuthService
 from plex_client import PlexClient
 from sync_manager import MediaEvent, SyncManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+_SESSION_COOKIE = "rpg_session"
 
 
 # ---------------------------------------------------------------------------
@@ -35,6 +38,7 @@ class AppState:
     plex: PlexClient
     cast: ChromecastManager
     sync: SyncManager
+    auth: PlexAuthService
 
 
 state = AppState()
@@ -43,10 +47,15 @@ state = AppState()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     state.redis = aioredis.from_url(settings.redis_url, decode_responses=False)
-    state.plex = PlexClient(settings.plex_url, settings.plex_token, state.redis)
+    state.auth = PlexAuthService(state.redis)
+
+    # Token may come from env OR from a previous login stored in Redis
+    plex_token = settings.plex_token or await state.auth.get_plex_token()
+    state.plex = PlexClient(settings.plex_url, plex_token, state.redis)
+
     state.cast = ChromecastManager(state.redis)
     state.sync = SyncManager(state.redis)
-    logger.info("discord-chromecast backend ready")
+    logger.info("discord-chromecast backend ready (token present: %s)", bool(plex_token))
     yield
     await state.redis.aclose()
 
@@ -58,12 +67,28 @@ app.add_middleware(
     allow_origins=settings.origins_list,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
+
+
+# ---------------------------------------------------------------------------
+# Auth dependency
+# ---------------------------------------------------------------------------
+
+async def require_auth(rpg_session: str | None = Cookie(default=None)) -> None:
+    """Raise 401 if the request has no valid session cookie."""
+    if not await state.auth.is_authenticated(rpg_session or ""):
+        raise HTTPException(status_code=401, detail="Not authenticated — please log in at /login")
 
 
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
 
 class PlayRequest(BaseModel):
     query: str
@@ -85,27 +110,68 @@ class ControlRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Routes
+# Auth routes (no session required)
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
 async def health() -> dict[str, str]:
+    token_ok = await state.auth.has_plex_token()
+    return {"status": "ok", "authenticated": token_ok}
+
+
+@app.post("/api/auth/login")
+async def login(req: LoginRequest, response: Response) -> dict[str, Any]:
+    """Authenticate with Plex TV and set a session cookie."""
+    try:
+        session_token = await state.auth.login(req.username, req.password)
+    except PlexAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+
+    # Refresh the PlexClient token in memory
+    plex_token = await state.auth.get_plex_token()
+    state.plex = PlexClient(settings.plex_url, plex_token, state.redis)
+
+    response.set_cookie(
+        key=_SESSION_COOKIE,
+        value=session_token,
+        httponly=True,
+        samesite="lax",
+        max_age=86400 * 7,
+    )
+    return {"status": "ok", "message": "Logged in to Plex"}
+
+
+@app.post("/api/auth/logout")
+async def logout(
+    response: Response,
+    rpg_session: str | None = Cookie(default=None),
+) -> dict[str, str]:
+    if rpg_session:
+        await state.auth.logout(rpg_session)
+    response.delete_cookie(_SESSION_COOKIE)
     return {"status": "ok"}
 
 
-@app.get("/api/devices")
+@app.get("/api/auth/status")
+async def auth_status(rpg_session: str | None = Cookie(default=None)) -> dict[str, Any]:
+    authenticated = await state.auth.is_authenticated(rpg_session or "")
+    token_present = await state.auth.has_plex_token()
+    return {"authenticated": authenticated, "plex_token_present": token_present}
+
+
+@app.get("/api/devices", dependencies=[Depends(require_auth)])
 async def list_devices() -> dict[str, Any]:
     devices = await state.cast.list_devices()
     return {"devices": [d.__dict__ for d in devices]}
 
 
-@app.get("/api/libraries")
+@app.get("/api/libraries", dependencies=[Depends(require_auth)])
 async def list_libraries() -> dict[str, Any]:
     libs = await state.plex.list_libraries()
     return {"libraries": libs}
 
 
-@app.post("/api/play")
+@app.post("/api/play", dependencies=[Depends(require_auth)])
 async def play(req: PlayRequest) -> dict[str, Any]:
     """Query Plex, resolve a direct URL, optionally cast it, and broadcast."""
     results = await state.plex.search_library(req.query, req.media_type)
@@ -139,7 +205,7 @@ async def play(req: PlayRequest) -> dict[str, Any]:
     }
 
 
-@app.post("/api/cast")
+@app.post("/api/cast", dependencies=[Depends(require_auth)])
 async def cast_url(req: CastRequest) -> dict[str, Any]:
     """Cast an arbitrary URL to a named Chromecast device."""
     ok = await state.cast.cast_media(
@@ -150,7 +216,7 @@ async def cast_url(req: CastRequest) -> dict[str, Any]:
     return {"cast": True}
 
 
-@app.post("/api/control")
+@app.post("/api/control", dependencies=[Depends(require_auth)])
 async def control(req: ControlRequest) -> dict[str, Any]:
     """Send play/pause/stop/seek to all WS clients and optionally to a cast device."""
     allowed = {"play", "pause", "stop", "seek"}
@@ -167,14 +233,14 @@ async def control(req: ControlRequest) -> dict[str, Any]:
     return {"action": req.action, "cast": cast_ok}
 
 
-@app.get("/api/status")
+@app.get("/api/status", dependencies=[Depends(require_auth)])
 async def status() -> dict[str, Any]:
     """Return current playback state from Redis."""
     s = await state.sync.get_state()
     return s or {"type": "status", "url": "", "title": "", "position": 0.0}
 
 
-@app.get("/api/search")
+@app.get("/api/search", dependencies=[Depends(require_auth)])
 async def search(q: str, media_type: str = "track") -> dict[str, Any]:
     """Search Plex library. Returns top-20 matches."""
     results = await state.plex.search_library(q, media_type)

@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RPG Media — Chromecast</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<header>
+  <h1>⚔ RPG Media</h1>
+  <div class="status-bar">
+    WS: <span id="ws-status" class="status-err">Disconnected</span>
+    &nbsp;|&nbsp;
+    <span id="cast-status">Cast: not connected</span>
+  </div>
+</header>
+
+<main>
+
+  <!-- Search -->
+  <div class="card">
+    <h2>Search Plex</h2>
+    <div class="search-row">
+      <input id="search-input" type="text" placeholder="battle theme, tavern music…" />
+      <select id="media-type">
+        <option value="track">Track</option>
+        <option value="episode">Episode</option>
+        <option value="movie">Movie</option>
+      </select>
+      <button id="btn-search">Search</button>
+    </div>
+    <ul id="search-results"></ul>
+  </div>
+
+  <!-- Now Playing -->
+  <div class="card">
+    <h2>Now Playing</h2>
+    <div class="now-playing">
+      <img id="track-thumb" alt="cover" />
+      <span id="track-title">—</span>
+    </div>
+    <div class="controls">
+      <button id="btn-play">▶ Play</button>
+      <button id="btn-pause">⏸ Pause</button>
+      <button id="btn-stop">⏹ Stop</button>
+      <button id="cast-btn">📺 Cast</button>
+    </div>
+    <audio id="audio-player" controls></audio>
+    <video id="video-player" controls></video>
+  </div>
+
+  <!-- Cast Devices -->
+  <div class="card">
+    <h2>Chromecast Devices</h2>
+    <button id="btn-refresh-devices">Refresh</button>
+    <ul id="device-list"></ul>
+  </div>
+
+</main>
+
+<!-- Google Cast Sender SDK -->
+<script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
+<script>window.BACKEND_HOST = location.hostname + ":8000";</script>
+<script src="cast.js"></script>
+<script src="player.js"></script>
+<script>
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+let selectedItem = null;
+
+document.getElementById("btn-search").addEventListener("click", async () => {
+  const q = document.getElementById("search-input").value.trim();
+  const mediaType = document.getElementById("media-type").value;
+  if (!q) return;
+
+  const res = await fetch(`http://${window.BACKEND_HOST}/api/search?q=${encodeURIComponent(q)}&media_type=${mediaType}`);
+  const data = await res.json();
+  const ul = document.getElementById("search-results");
+  ul.innerHTML = "";
+
+  (data.results || []).forEach(item => {
+    const li = document.createElement("li");
+    li.textContent = item.title;
+    li.dataset.url = item.direct_url;
+    li.dataset.contentType = item.content_type;
+    li.dataset.title = item.title;
+    li.dataset.thumb = item.thumb_url || "";
+    li.addEventListener("click", () => selectResult(item));
+    ul.appendChild(li);
+  });
+});
+
+document.getElementById("search-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") document.getElementById("btn-search").click();
+});
+
+function selectResult(item) {
+  selectedItem = item;
+  loadMedia(item.direct_url, item.content_type, item.title, item.thumb_url);
+}
+
+// ---------------------------------------------------------------------------
+// Device list
+// ---------------------------------------------------------------------------
+async function refreshDevices() {
+  const res = await fetch(`http://${window.BACKEND_HOST}/api/devices`);
+  const data = await res.json();
+  const ul = document.getElementById("device-list");
+  ul.innerHTML = "";
+  (data.devices || []).forEach(dev => {
+    const li = document.createElement("li");
+    li.textContent = `📺 ${dev.name}`;
+    li.title = `${dev.host}:${dev.port}`;
+    li.addEventListener("click", () => castToDevice(dev.name));
+    ul.appendChild(li);
+  });
+}
+
+document.getElementById("btn-refresh-devices").addEventListener("click", refreshDevices);
+refreshDevices();
+
+async function castToDevice(deviceName) {
+  if (!selectedItem) { alert("Select a track first"); return; }
+  await fetch(`http://${window.BACKEND_HOST}/api/play`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      query: selectedItem.title,
+      media_type: "track",
+      device_name: deviceName,
+    }),
+  });
+}
+</script>
+
+</body>
+</html>

@@ -1,0 +1,61 @@
+version: "3.9"
+
+networks:
+  cast_net:
+    driver: bridge
+
+services:
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks: [cast_net]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    networks: [cast_net]
+    # mDNS discovery requires host network access on Linux
+    network_mode: host
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      REDIS_URL: redis://localhost:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    networks: [cast_net]
+    depends_on: [backend]
+
+  bot:
+    build: ./bot
+    restart: unless-stopped
+    networks: [cast_net]
+    env_file: .env
+    environment:
+      BACKEND_URL: http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  redis_data:

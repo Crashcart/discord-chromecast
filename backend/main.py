@@ -17,6 +17,8 @@ from fastapi import Cookie, Depends, FastAPI, HTTPException, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from ai_client import AIClient, AIUnavailableError
+from ai_settings_service import AISettingsService
 from cast_manager import ChromecastManager
 from config import settings
 from plex_auth import PlexAuthError, PlexAuthService
@@ -39,6 +41,8 @@ class AppState:
     cast: ChromecastManager
     sync: SyncManager
     auth: PlexAuthService
+    ai_settings: AISettingsService
+    ai: AIClient
 
 
 state = AppState()
@@ -55,6 +59,8 @@ async def lifespan(app: FastAPI):
 
     state.cast = ChromecastManager(state.redis)
     state.sync = SyncManager(state.redis)
+    state.ai_settings = AISettingsService(state.redis)
+    state.ai = AIClient(state.ai_settings)
     logger.info("discord-chromecast backend ready (token present: %s)", bool(plex_token))
     yield
     await state.redis.aclose()
@@ -107,6 +113,26 @@ class ControlRequest(BaseModel):
     action: str         # play | pause | stop | seek
     device_name: str = ""
     position: float = 0.0
+
+
+class AISettingsRequest(BaseModel):
+    provider: str = "disabled"          # disabled | ollama | gemini
+    ollama_url: str = "http://localhost:11434"
+    ollama_model: str = "mistral"
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-1.5-flash"
+    system_prompt: str = ""
+
+
+class AISuggestRequest(BaseModel):
+    scene: str                          # GM's scene description
+    auto_play: bool = False             # if True, play the first suggestion immediately
+    device_name: str = ""              # cast device (if auto_play)
+
+
+class AINarrateRequest(BaseModel):
+    title: str                          # currently-playing track title
+    scene: str = ""                    # optional scene context
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +271,89 @@ async def search(q: str, media_type: str = "track") -> dict[str, Any]:
     """Search Plex library. Returns top-20 matches."""
     results = await state.plex.search_library(q, media_type)
     return {"results": [r.__dict__ for r in results]}
+
+
+# ---------------------------------------------------------------------------
+# AI settings routes
+# ---------------------------------------------------------------------------
+
+@app.get("/api/settings/ai", dependencies=[Depends(require_auth)])
+async def get_ai_settings() -> dict[str, Any]:
+    cfg = await state.ai_settings.get()
+    # Redact API key — return a mask so the UI can show it's set
+    redacted = dict(cfg)
+    if redacted.get("gemini_api_key"):
+        redacted["gemini_api_key"] = "••••••••" + redacted["gemini_api_key"][-4:]
+    return redacted
+
+
+@app.post("/api/settings/ai", dependencies=[Depends(require_auth)])
+async def save_ai_settings(req: AISettingsRequest) -> dict[str, Any]:
+    allowed_providers = {"disabled", "ollama", "gemini"}
+    if req.provider not in allowed_providers:
+        raise HTTPException(status_code=400, detail=f"provider must be one of {allowed_providers}")
+
+    updates = req.model_dump()
+
+    # If the key is the masked placeholder, keep the existing key
+    existing = await state.ai_settings.get()
+    if updates.get("gemini_api_key", "").startswith("••••"):
+        updates["gemini_api_key"] = existing.get("gemini_api_key", "")
+
+    saved = await state.ai_settings.save(updates)
+    return {"status": "ok", "provider": saved["provider"]}
+
+
+# ---------------------------------------------------------------------------
+# AI feature routes
+# ---------------------------------------------------------------------------
+
+@app.post("/api/ai/suggest", dependencies=[Depends(require_auth)])
+async def ai_suggest(req: AISuggestRequest) -> dict[str, Any]:
+    """Ask the AI for Plex search terms based on a scene description."""
+    try:
+        terms = await state.ai.suggest(req.scene)
+    except AIUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    result: dict[str, Any] = {"terms": terms, "played": None}
+
+    if req.auto_play and terms:
+        # Play the first suggestion automatically
+        search_results = await state.plex.search_library(terms[0])
+        if search_results:
+            item = search_results[0]
+            event = MediaEvent(
+                type="url",
+                url=item.direct_url,
+                title=item.title,
+                content_type=item.content_type,
+                thumb_url=item.thumb_url,
+            )
+            await state.sync.broadcast(event)
+            if req.device_name:
+                await state.cast.cast_media(req.device_name, item.direct_url, item.content_type, item.title)
+            result["played"] = {"title": item.title, "url": item.direct_url}
+
+    return result
+
+
+@app.post("/api/ai/narrate", dependencies=[Depends(require_auth)])
+async def ai_narrate(req: AINarrateRequest) -> dict[str, Any]:
+    """Generate a short atmospheric narration for the now-playing track."""
+    try:
+        text = await state.ai.narrate(req.title, req.scene)
+    except AIUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    # Broadcast narration to all WS clients as a special event type
+    await state.sync.broadcast(MediaEvent(type="narration", title=req.title, url=text))
+    return {"narration": text}
+
+
+@app.get("/api/ai/health", dependencies=[Depends(require_auth)])
+async def ai_health() -> dict[str, Any]:
+    return await state.ai.health_check()
 
 
 # ---------------------------------------------------------------------------

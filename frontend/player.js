@@ -69,6 +69,11 @@ function handleMediaEvent(event) {
     case "seek":
       seekMedia(event.position || 0);
       break;
+    case "narration":
+      if (typeof window._handleNarrationEvent === "function") {
+        window._handleNarrationEvent(event.url); // url field holds the narration text
+      }
+      break;
     default:
       console.debug("[player] unknown event type:", event.type);
   }

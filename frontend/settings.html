@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RPG Media — Settings</title>
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    .nav { display:flex; gap:1rem; align-items:center; }
+    .nav a { color:var(--muted); text-decoration:none; font-size:0.85rem; }
+    .nav a:hover { color:var(--text); }
+    .nav a.active { color:var(--accent); }
+
+    .field { display:flex; flex-direction:column; gap:0.35rem; margin-bottom:1rem; }
+    .field label { font-size:0.78rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.08em; }
+    .field input, .field select, .field textarea {
+      background:#0f3460; border:1px solid transparent; border-radius:var(--radius);
+      padding:0.6rem 0.9rem; color:var(--text); font-size:0.95rem; width:100%;
+      transition:border-color 0.15s;
+    }
+    .field input:focus, .field select:focus, .field textarea:focus {
+      outline:none; border-color:var(--accent);
+    }
+    .field textarea { resize:vertical; min-height:80px; font-family:inherit; }
+    .field small { font-size:0.75rem; color:var(--muted); }
+
+    .provider-section { display:none; margin-top:0.5rem; }
+    .provider-section.visible { display:block; }
+
+    .row { display:flex; gap:0.75rem; }
+    .row .field { flex:1; }
+
+    .save-bar { display:flex; align-items:center; gap:1rem; margin-top:0.5rem; }
+    #save-msg { font-size:0.85rem; color:#4caf50; }
+    #save-err  { font-size:0.85rem; color:var(--accent); }
+
+    .health-badge {
+      display:inline-flex; align-items:center; gap:0.4rem;
+      font-size:0.8rem; padding:0.25rem 0.6rem;
+      border-radius:20px; background:#0f3460;
+    }
+    .dot { width:8px; height:8px; border-radius:50%; background:var(--muted); }
+    .dot.ok  { background:#4caf50; }
+    .dot.err { background:var(--accent); }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>⚔ RPG Media</h1>
+  <div class="nav">
+    <a href="index.html">Player</a>
+    <a href="settings.html" class="active">Settings</a>
+    <button id="btn-logout" style="padding:0.25rem 0.7rem;font-size:0.75rem;">Sign out</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- AI Provider -->
+  <div class="card">
+    <h2>AI Provider
+      <span id="ai-health-badge" class="health-badge" style="margin-left:0.75rem;float:right;">
+        <span class="dot" id="health-dot"></span>
+        <span id="health-label">—</span>
+      </span>
+    </h2>
+
+    <div class="field">
+      <label>Provider</label>
+      <select id="ai-provider">
+        <option value="disabled">Disabled</option>
+        <option value="ollama">Ollama (local)</option>
+        <option value="gemini">Google Gemini</option>
+      </select>
+    </div>
+
+    <!-- Ollama settings -->
+    <div id="section-ollama" class="provider-section">
+      <div class="row">
+        <div class="field">
+          <label>Ollama URL</label>
+          <input id="ollama-url" type="url" placeholder="http://localhost:11434" />
+          <small>Base URL of your Ollama instance (no trailing slash)</small>
+        </div>
+        <div class="field">
+          <label>Model</label>
+          <input id="ollama-model" type="text" placeholder="mistral" />
+          <small>Any model pulled in Ollama (e.g. mistral, llama3, phi3)</small>
+        </div>
+      </div>
+    </div>
+
+    <!-- Gemini settings -->
+    <div id="section-gemini" class="provider-section">
+      <div class="row">
+        <div class="field">
+          <label>Gemini API Key</label>
+          <input id="gemini-key" type="password" placeholder="AIza…" autocomplete="off" />
+          <small>Get a key at <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:var(--accent)">aistudio.google.com</a></small>
+        </div>
+        <div class="field">
+          <label>Model</label>
+          <select id="gemini-model">
+            <option value="gemini-1.5-flash">gemini-1.5-flash (fast)</option>
+            <option value="gemini-1.5-pro">gemini-1.5-pro (smart)</option>
+            <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- System prompt (shared) -->
+    <div class="field" id="field-system-prompt" style="display:none;">
+      <label>System Prompt</label>
+      <textarea id="system-prompt"></textarea>
+      <small>Injected before every AI request. Controls tone and behaviour.</small>
+    </div>
+
+    <div class="save-bar">
+      <button id="btn-save-ai">Save AI Settings</button>
+      <button id="btn-test-ai" style="background:#0f3460;">Test Connection</button>
+      <span id="save-msg"></span>
+      <span id="save-err"></span>
+    </div>
+  </div>
+
+  <!-- Plex connection info -->
+  <div class="card">
+    <h2>Plex Connection</h2>
+    <p style="font-size:0.85rem; color:var(--muted); margin-bottom:1rem;">
+      Plex credentials are configured at login. To use a different account,
+      sign out and log in again.
+    </p>
+    <div id="plex-status" style="font-size:0.85rem;"></div>
+  </div>
+
+</main>
+
+<script>
+const BACKEND = `http://${location.hostname}:8000`;
+
+// Auth guard
+fetch(`${BACKEND}/api/auth/status`, { credentials: "include" })
+  .then(r => r.json())
+  .then(d => { if (!d.authenticated) location.replace("login.html"); })
+  .catch(() => {});
+
+document.getElementById("btn-logout").addEventListener("click", async () => {
+  await fetch(`${BACKEND}/api/auth/logout`, { method: "POST", credentials: "include" });
+  location.replace("login.html");
+});
+
+// ---------------------------------------------------------------------------
+// Provider section toggle
+// ---------------------------------------------------------------------------
+const providerEl = document.getElementById("ai-provider");
+const sectionOllama = document.getElementById("section-ollama");
+const sectionGemini = document.getElementById("section-gemini");
+const fieldPrompt   = document.getElementById("field-system-prompt");
+
+function showProviderSection(val) {
+  sectionOllama.classList.toggle("visible", val === "ollama");
+  sectionGemini.classList.toggle("visible", val === "gemini");
+  fieldPrompt.style.display = val !== "disabled" ? "flex" : "none";
+  fieldPrompt.style.flexDirection = "column";
+}
+
+providerEl.addEventListener("change", () => showProviderSection(providerEl.value));
+
+// ---------------------------------------------------------------------------
+// Load settings
+// ---------------------------------------------------------------------------
+async function loadSettings() {
+  try {
+    const r = await fetch(`${BACKEND}/api/settings/ai`, { credentials: "include" });
+    if (!r.ok) return;
+    const d = await r.json();
+
+    providerEl.value = d.provider || "disabled";
+    document.getElementById("ollama-url").value   = d.ollama_url    || "";
+    document.getElementById("ollama-model").value = d.ollama_model  || "mistral";
+    document.getElementById("gemini-key").value   = d.gemini_api_key || "";
+    document.getElementById("gemini-model").value = d.gemini_model  || "gemini-1.5-flash";
+    document.getElementById("system-prompt").value = d.system_prompt || "";
+    showProviderSection(d.provider);
+  } catch (e) {
+    console.warn("Could not load AI settings:", e);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Save settings
+// ---------------------------------------------------------------------------
+document.getElementById("btn-save-ai").addEventListener("click", async () => {
+  const msgEl = document.getElementById("save-msg");
+  const errEl = document.getElementById("save-err");
+  msgEl.textContent = ""; errEl.textContent = "";
+
+  const body = {
+    provider:        providerEl.value,
+    ollama_url:      document.getElementById("ollama-url").value.trim(),
+    ollama_model:    document.getElementById("ollama-model").value.trim(),
+    gemini_api_key:  document.getElementById("gemini-key").value,
+    gemini_model:    document.getElementById("gemini-model").value,
+    system_prompt:   document.getElementById("system-prompt").value,
+  };
+
+  try {
+    const r = await fetch(`${BACKEND}/api/settings/ai`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (r.ok) {
+      msgEl.textContent = `✓ Saved (provider: ${d.provider})`;
+      setTimeout(() => msgEl.textContent = "", 3000);
+    } else {
+      errEl.textContent = d.detail || "Save failed.";
+    }
+  } catch (e) {
+    errEl.textContent = "Network error.";
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Test connection
+// ---------------------------------------------------------------------------
+document.getElementById("btn-test-ai").addEventListener("click", async () => {
+  const dot   = document.getElementById("health-dot");
+  const label = document.getElementById("health-label");
+  label.textContent = "Testing…";
+  dot.className = "dot";
+
+  try {
+    const r = await fetch(`${BACKEND}/api/ai/health`, { credentials: "include" });
+    const d = await r.json();
+    if (d.ok) {
+      dot.className = "dot ok";
+      label.textContent = `${d.provider} — connected`;
+    } else {
+      dot.className = "dot err";
+      label.textContent = d.error || "Unreachable";
+    }
+  } catch (e) {
+    dot.className = "dot err";
+    label.textContent = "Request failed";
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Plex status
+// ---------------------------------------------------------------------------
+async function loadPlexStatus() {
+  try {
+    const r = await fetch(`${BACKEND}/health`, { credentials: "include" });
+    const d = await r.json();
+    document.getElementById("plex-status").innerHTML =
+      d.authenticated
+        ? `<span style="color:#4caf50">✓ Plex token active</span>`
+        : `<span style="color:var(--accent)">✗ No Plex token — <a href="login.html" style="color:var(--accent)">sign in</a></span>`;
+  } catch {
+    document.getElementById("plex-status").textContent = "Could not reach backend.";
+  }
+}
+
+loadSettings();
+loadPlexStatus();
+</script>
+</body>
+</html>

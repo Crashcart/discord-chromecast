@@ -15,6 +15,8 @@
     &nbsp;|&nbsp;
     <span id="cast-status">Cast: not connected</span>
     &nbsp;|&nbsp;
+    <a href="settings.html" style="color:var(--muted);text-decoration:none;font-size:0.85rem;">⚙ Settings</a>
+    &nbsp;|&nbsp;
     <button id="btn-logout" style="padding:0.25rem 0.7rem;font-size:0.75rem;">Sign out</button>
   </div>
 </header>
@@ -51,6 +53,17 @@
     </div>
     <audio id="audio-player" controls></audio>
     <video id="video-player" controls></video>
+  </div>
+
+  <!-- AI Suggest -->
+  <div class="card" id="ai-card">
+    <h2>AI Scene Assistant <span id="ai-badge" style="font-size:0.7rem;color:var(--muted);font-weight:normal;margin-left:0.5rem;">disabled</span></h2>
+    <div class="search-row">
+      <input id="ai-scene-input" type="text" placeholder="Describe the scene… e.g. 'tense dungeon crawl, dripping water'" />
+      <button id="btn-ai-suggest">Suggest</button>
+    </div>
+    <ul id="ai-results" style="list-style:none;margin-top:0.75rem;display:flex;flex-direction:column;gap:0.4rem;"></ul>
+    <div id="ai-narration" style="margin-top:0.75rem;font-style:italic;color:var(--muted);font-size:0.9rem;display:none;"></div>
   </div>
 
   <!-- Cast Devices -->
@@ -151,6 +164,82 @@ async function castToDevice(deviceName) {
     }),
   });
 }
+
+// ---------------------------------------------------------------------------
+// AI badge — show provider name if configured
+// ---------------------------------------------------------------------------
+fetch(`http://${window.BACKEND_HOST}/api/settings/ai`, { credentials: "include" })
+  .then(r => r.json())
+  .then(d => {
+    const badge = document.getElementById("ai-badge");
+    if (d.provider && d.provider !== "disabled") {
+      badge.textContent = d.provider;
+      badge.style.color = "#4caf50";
+    }
+  })
+  .catch(() => {});
+
+// ---------------------------------------------------------------------------
+// AI Suggest
+// ---------------------------------------------------------------------------
+document.getElementById("btn-ai-suggest").addEventListener("click", async () => {
+  const scene = document.getElementById("ai-scene-input").value.trim();
+  if (!scene) return;
+
+  const btn = document.getElementById("btn-ai-suggest");
+  btn.disabled = true;
+  btn.textContent = "…";
+
+  try {
+    const r = await fetch(`http://${window.BACKEND_HOST}/api/ai/suggest`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scene, auto_play: false }),
+    });
+
+    if (r.status === 503) {
+      const d = await r.json();
+      alert(d.detail || "AI not configured — visit Settings.");
+      return;
+    }
+
+    const data = await r.json();
+    const ul = document.getElementById("ai-results");
+    ul.innerHTML = "";
+
+    (data.terms || []).forEach(term => {
+      const li = document.createElement("li");
+      li.textContent = `🎵 ${term}`;
+      li.style.cssText = "background:#0f3460;border-radius:var(--radius);padding:0.4rem 0.8rem;font-size:0.85rem;cursor:pointer;";
+      li.addEventListener("mouseenter", () => li.style.background = "var(--accent)");
+      li.addEventListener("mouseleave", () => li.style.background = "#0f3460");
+      li.addEventListener("click", () => {
+        document.getElementById("search-input").value = term;
+        document.getElementById("btn-search").click();
+      });
+      ul.appendChild(li);
+    });
+  } catch (e) {
+    alert("AI request failed: " + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Suggest";
+  }
+});
+
+document.getElementById("ai-scene-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") document.getElementById("btn-ai-suggest").click();
+});
+
+// ---------------------------------------------------------------------------
+// AI Narration — shown when WS receives a narration event
+// ---------------------------------------------------------------------------
+window._handleNarrationEvent = function(text) {
+  const el = document.getElementById("ai-narration");
+  el.textContent = `"${text}"`;
+  el.style.display = "block";
+};
 </script>
 
 </body>
